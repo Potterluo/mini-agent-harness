@@ -11,7 +11,7 @@ from typing import Any
 from .domain import AssistantMessage, Context, Decision, ToolCall, ToolResult, UserMessage
 from .ports import ModelSetting
 
-DEFAULT_MAX_TOKENS = 2048
+DEFAULT_MAX_TOKENS = 4096
 
 
 def to_api_messages(context: Context) -> list[dict[str, Any]]:
@@ -66,6 +66,7 @@ class OpenAIChatClient:
         self.effort = effort
         self.max_tokens = max_tokens
         self.last_usage: dict[str, Any] = {}
+        self.last_finish_reason: str | None = None
 
     def _request(self, context: Context, setting: ModelSetting) -> Any:
         extra_body: dict[str, Any] = {}
@@ -92,13 +93,22 @@ class OpenAIChatClient:
                 "completion": getattr(usage, "completion_tokens", 0),
                 "cache_hit": getattr(usage, "prompt_cache_hit_tokens", None),
             }
+        self.last_finish_reason = getattr(response.choices[0], "finish_reason", None)
         return response.choices[0].message
 
     def generate(self, context: Context, setting: ModelSetting) -> AssistantMessage | Decision:
         message = self._request(context, setting)
 
         if context.output_type is Decision:
-            return _parse_decision(getattr(message, "content", "") or "")
+            # 有些模型在思考模式下只把内容放进 reasoning_content，content 为空。
+            # 这里只在解析审核结论时兜底读取，历史里绝不回灌。
+            raw = getattr(message, "content", "") or getattr(message, "reasoning_content", "") or ""
+            if not raw.strip():
+                return Decision(
+                    approved=False,
+                    reason=f"reviewer returned empty content (finish_reason={self.last_finish_reason}, usage={self.last_usage})",
+                )
+            return _parse_decision(raw)
 
         calls: list[ToolCall] = []
         for call in getattr(message, "tool_calls", None) or []:
@@ -142,4 +152,4 @@ def _parse_decision(raw: str) -> Decision:
             return Decision(approved=bool(payload.get("approved")), reason=str(payload.get("reason", ""))[:200])
         except json.JSONDecodeError:
             pass
-    return Decision(approved=False, reason="reviewer returned unparsable output")
+    return Decision(approved=False, reason="reviewer returned unparsable output: " + raw[:120].replace("\n", " "))

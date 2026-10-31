@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 
-from .domain import AssistantMessage, Context, Decision, Session, ToolCall, Tool
+from .domain import AssistantMessage, Context, Decision, Session, ToolCall, ToolResult, Tool
 from .ports import Role
 
 
@@ -29,7 +29,11 @@ class AssistantRole:
 
 
 class ReviewerRole:
-    """审核角色没有工具：它只判断这次调用该不该执行。"""
+    """审核角色：拿到的是一份独立组织的上下文，不是整段对话。
+
+    把完整历史丢给它，它会顺着助手的样子继续调工具（finish_reason=tool_calls），
+    而不是回一个判断。所以这里只给它三样东西：任务、最近的工具结果、待审调用。
+    """
 
     name = "reviewer"
 
@@ -37,17 +41,28 @@ class ReviewerRole:
         self.instruction = instruction
 
     def build(self, session: Session, *, tool_call: ToolCall | None = None) -> Context[Decision]:
-        detail = ""
+        task = session.last_user_text() or "(unknown)"
+        recent: list[str] = []
+        for message in session.messages[-6:]:
+            if isinstance(message, ToolResult):
+                recent.append(f"- 工具结果：{message.content[:200]}")
+            elif isinstance(message, AssistantMessage) and message.text:
+                recent.append(f"- 助手说过：{message.text[:200]}")
+
+        detail = [f"\n\n当前任务：{task}"]
+        if recent:
+            detail.append("最近发生的事：")
+            detail.extend(recent)
         if tool_call is not None:
-            detail = (
-                f"\n\n待审调用：\n工具：{tool_call.name}\n"
-                f"参数：{json.dumps(tool_call.arguments, ensure_ascii=False)}\n\n"
-                '只回一个 JSON：{"approved": true/false, "reason": "一句话原因"}'
+            detail.append(
+                f"待审调用：{tool_call.name}，参数 {json.dumps(tool_call.arguments, ensure_ascii=False)}"
             )
+        detail.append('只输出一个 JSON，不要解释：{"approved": true 或 false, "reason": "一句话"}')
+
         return Context(
-            instruction=self.instruction + detail,
+            instruction=self.instruction + "\n".join(detail),
             tools=[],
-            history=list(session.messages),
+            history=[],
             output_type=Decision,
         )
 
