@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from .context import clip
 from .domain import AssistantMessage, Decision, Session, ToolCall, ToolResult, UserMessage
 from .ports import ModelClient, ModelSetting, SessionStore
 
@@ -82,6 +83,18 @@ class AgentService:
         self.on_event("review", {"tool": call.name, "approved": decision.approved, "reason": decision.reason})
         return decision
 
+    # ---- 工作记忆：每跑完一个工具就记一笔 ------------------------------
+
+    def _note(self, session: Session, name: str, arguments: dict[str, Any], result: str) -> None:
+        memory = session.memory
+        files = memory.setdefault("files", [])
+        notes = memory.setdefault("notes", [])
+
+        path = arguments.get("path")
+        if path and name in {"read_file", "write_file", "patch_file"}:
+            _remember(files, str(path), 8)
+        _remember(notes, f"{name}: {clip(result, 200)}", 5)
+
     def _handle_call(self, session: Session, call: ToolCall) -> None:
         decision = self._review(session, call)
         if not decision.approved:
@@ -92,6 +105,7 @@ class AgentService:
         result = self.toolbox.run(call.name, call.arguments)
         self.on_event("tool", {"name": call.name, "result": result})
         session.append(ToolResult(tool_call_id=call.id, content=result))
+        self._note(session, call.name, call.arguments, result)
 
 
 def _session_id() -> str:
@@ -99,3 +113,13 @@ def _session_id() -> str:
     import uuid
 
     return datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+
+
+def _remember(bucket: list[str], item: str, limit: int) -> None:
+    """去重、移到末尾、超出上限丢最旧的。工作记忆只关心最近发生了什么。"""
+    if not item or limit <= 0:
+        return
+    if item in bucket:
+        bucket.remove(item)
+    bucket.append(item)
+    del bucket[:-limit]
