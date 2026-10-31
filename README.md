@@ -50,21 +50,32 @@ README 按工程顺序组织：先讲 agent 怎么跑，再给场景推需求，
 
 ## 四、架构设计
 
-### 三层
+三层的数量由第三节的约束推出来，不是审美选择。推导过程比结论重要。
 
-| 层 | 放什么 | 判断标准 |
-| --- | --- | --- |
-| 领域层 | Session、消息、Tool、Context、Decision | 换外部服务它不用改 |
-| 应用层 | 循环、角色、上下文组装、接口定义 | 只 import 领域层 |
-| 适配层 | 文件系统、git、模型 API、JSON 存储 | 实现应用层接口 |
-| 装配根 | 创建具体类、接线 | 唯一 import 适配层的地方 |
+### 第一刀：概念与协议分开
+
+不分层会发生什么：换一家模型，请求格式、参数名、思维链字段全埋在循环中间，得在循环里到处打补丁；测试循环，`generate` 直接打真接口，几十个用例跑一次几十块钱。
+
+根源是两种变化速度不同的代码被搅在一起。一种描述「系统是什么」：对话、消息、工具、上下文，跟任何厂商无关。另一种描述「怎么跟外部说话」：模型 API 的字段名、文件系统规则、git 输出格式。前一种归领域层，后一种归适配层。判断标准：换任何一家外部服务，领域层一行不用改。
+
+### 第二刀：编排与实现分开
+
+循环要调模型、存会话，它 import 谁？import 具体的 `OpenAIChatClient`，换模型还是要改循环，第一刀白切。解法是接口定义在应用层、实现在适配层，依赖方向翻转过来。教科书里叫依赖倒置，把它请进来的理由很具体：换模型不能改循环。
+
+「测试不花钱」也在这里兑现：`ModelClient` 是协议，测试里塞一个按脚本回放的假客户端，循环四种分支全部离线覆盖。
+
+### 第三刀：留一个接线的洞
+
+谁把具体类创建出来接到一起？任何地方都能 `OpenAIChatClient(...)` 的话，具体类引用就散回各处。所以留一个装配根，全系统唯一 import 适配层的地方。换模型改这里一行，换存储改这里一行。判断标准：全仓库 grep 适配层的类名，只应命中装配根一个文件。
 
 ### 四个抽象
 
-- `Session` + 三种消息（`UserMessage` / `AssistantMessage(text, tool_calls)` / `ToolResult(tool_call_id, content)`）+ `ToolCall(id, name, arguments)`。
-- `Tool` 协议：name、description、parameters、risky、invoke。`risky` 是工具本身的属性，不是某次调用的属性，所以放领域层。
-- `Context<OpType>` 带泛型输出类型：回复用 `AssistantMessage`，审核用 `Decision`，同一套组装逻辑。
-- 三个接口：`SessionStore`、`ModelClient`、`Approver`，全部 Protocol。
+每个抽象回答循环里的一个问题，检验方式一样：删掉它，哪段代码会变形。
+
+- 对话是什么：`Session` + 三种消息（`UserMessage` / `AssistantMessage(text, tool_calls)` / `ToolResult(tool_call_id, content)`）+ `ToolCall(id, name, arguments)`。id 是把「要的动作」和「动作的结果」对上的唯一凭据。
+- 动作是什么：`Tool` 协议，name、description、parameters 给模型看，invoke 给执行层看。`risky` 放领域层，因为危险是工具的属性，不是某次调用的属性：run_shell 无论被谁、为什么调用都是危险动作。
+- 模型看到什么：`Context<OpType>` 带泛型输出类型，回复用 `AssistantMessage`、审核用 `Decision`，同一套组装逻辑。
+- 一次动作谁说了算：`Decision(approved, reason)`，拒绝必须带原因，原因会交还模型让它换策略；外加 `SessionStore`、`ModelClient`、`Approver` 三个接口。
 
 ### 怎么往上加瓦
 
@@ -76,7 +87,7 @@ README 按工程顺序组织：先讲 agent 怎么跑，再给场景推需求，
 | 工作记忆 | 复用 `Session.memory` | 循环里加记账 | 存储已支持 | 无 |
 | 有界委派 | 复用 `Tool` | 无 | 加 `DelegateTool` | 按深度注册 |
 
-三块里两块没动领域层。
+三块里两块没动领域层。概念层稳定之后，新能力大多只碰一个文件；反过来，每次加功能都要动 `Session` 或 `Tool`，说明领域建模漏了东西。
 
 ## 五、实现
 
