@@ -119,25 +119,55 @@ README 按工程顺序组织：先讲 agent 怎么跑，再给场景推需求，
 
 ## 六、验证
 
-103 个用例，全部用临时目录与假模型客户端，不联网，不到一秒跑完。
+### 6.1 测试
 
-真实运行（`deepseek-v4.1-flash`）：
+103 个用例，全部用临时目录与假模型客户端，不联网，不到一秒跑完。它们兑现的是第二节那条「测试不花钱」：`ModelClient` 是协议，假客户端按脚本回放，循环的四种分支（正常结束、审核拒绝、批准拒绝、步数上限）全部离线覆盖。
+
+### 6.2 实验设置
+
+对象是 `demo-repo`：`calc.py` 里 `add` 用了减法、`mean` 多减了 1，`python -m unittest` 两个用例全红。环境 Windows，模型 `deepseek-v4.1-flash`，批准模式 `auto`。
+
+```bash
+python cli.py --cwd demo-repo --approval auto --max-iterations 8 \
+  "跑一下 python -m unittest，把失败的测试修好。只改 calc.py。"
+```
+
+### 6.3 运行过程
+
+18 秒跑完，12 次模型调用（5 次决策 + 7 次审核）。
 
 ```
-[assistant] tools: run_shell
-[tool] run_shell: FF                     # 两个用例失败
-[assistant] tools: read_file, read_file
+[tool] list_files: __pycache__/ ...
 [tool] read_file: def add(a, b): ...
-[assistant] 两个 bug 都清楚：add 用了减法，mean 多减了 1
-[assistant] tools: patch_file
-[review] patch_file -> approved
-[tool] patch_file: patched calc.py (1 replacement)
-[assistant] tools: run_shell
-[tool] run_shell: ..                     # 通过
-[assistant] 测试全部通过。
+[tool] read_file: import unittest ...
+[tool] run_shell: FF                          # 两个用例失败
+[assistant] 两个失败：add 用了 a - b；mean 多减了 1
+[tool] patch_file: patched calc.py (1 replacement)   # ×2，每次过审
+[tool] run_shell: ..                          # 通过
+[assistant] 两个测试都通过了。
 ```
 
-8 次模型调用，几百毫秒工具耗时，改动落在一个文件的两处函数。
+四步走位值得注意：先 `list_files` 确认文件存在，再读源码和测试并跑一遍拿到失败信息，然后分两次精确替换，最后重跑验证。这个顺序没有写在提示词里，RULES 只约束「改之前先读」「完成后用纯文本总结」，具体路径是模型看着现场自己选的。
+
+### 6.4 结果
+
+改动只落在 `calc.py` 两行：
+
+```diff
+ def add(a, b):
+-    return a - b
++    return a + b
+
+ def mean(values):
+-    return sum(values) / len(values) - 1
++    return sum(values) / len(values)
+```
+
+仓库外单独跑 `python -m unittest` 输出 `Ran 2 tests ... OK`；`test_calc.py` 一个字节没动，满足「只改 calc.py」的约束。会话文件里留下工作记忆：`files` 记着 `calc.py` 和 `test_calc.py`，`notes` 五条工具摘要。
+
+### 6.5 成本
+
+12 次调用里 7 次是审核，超过一半。这是三道闸的价格标签。小任务可以把 `reviewer_setting` 换成更便宜的模型，或者不装这道闸，可选正是它作为组件的意义。
 
 ## 七、复盘
 
