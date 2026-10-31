@@ -150,7 +150,7 @@ class ListFiles(_Base):
         if not target.exists():
             raise FileNotFoundError(f"no such path: {arguments.get('path')}")
         entries = sorted(target.iterdir(), key=lambda item: (item.is_file(), item.name))
-        lines = [("📁 " if item.is_dir() else "   ") + item.name for item in entries[:200]]
+        lines = [("dir  " if item.is_dir() else "     ") + item.name for item in entries[:200]]
         return "\n".join(lines) or "(empty)"
 
 

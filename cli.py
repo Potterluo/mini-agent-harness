@@ -9,6 +9,13 @@ from __future__ import annotations
 import argparse
 import sys
 
+# Windows 控制台默认 GBK，中文和符号会直接抛 UnicodeEncodeError。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 from harness.runtime import build_service
 
 
