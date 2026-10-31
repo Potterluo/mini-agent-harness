@@ -47,6 +47,8 @@ def build_service(
     read_only: bool = False,
     max_iterations: int = 8,
     runs_dir: str | Path | None = None,
+    depth: int = 0,
+    max_depth: int = 1,
     approver: Callable[[str, dict[str, Any]], bool] | None = None,
     on_event: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> AgentService:
@@ -63,6 +65,23 @@ def build_service(
     assistant = AssistantRole(ASSISTANT_INSTRUCTION + "\n\n" + workspace.text(), toolbox.tools)
     reviewer = ReviewerRole(REVIEWER_INSTRUCTION)
 
+    # 组件六：只有还没到深度上限的 agent 才拿得到 delegate 工具，
+    # 所以子 agent 无法继续往下派，递归从结构上被掐断。
+    if depth < max_depth:
+        toolbox.register(
+            DelegateTool(
+                root=workspace.root,
+                model=model,
+                api_key=api_key,
+                base_url=base_url,
+                thinking=thinking,
+                effort=effort,
+                depth=depth,
+                max_depth=max_depth,
+                runs_dir=runs_dir,
+            )
+        )
+
     return AgentService(
         store=store,
         client=client,
@@ -73,3 +92,56 @@ def build_service(
         max_iterations=max_iterations,
         on_event=on_event,
     )
+
+
+class DelegateTool:
+    """有界委派：派一个只读、步数更少、不能再往下派的子 agent 去查支线。
+
+    三个限制：read_only=True 只能看不能改；max_iterations 更小；
+    depth 已经等于 max_depth，所以子 agent 的 toolbox 里不会再注册本工具。
+    """
+
+    name = "delegate"
+    description = "派一个只读的子 agent 去调查一个支线问题，只把结论带回来。"
+    risky = False
+    parameters = {
+        "type": "object",
+        "properties": {
+            "task": {"type": "string", "description": "要调查什么，写成一句完整的话"},
+            "max_steps": {"type": "integer", "description": "子 agent 的步数上限，默认 3"},
+        },
+        "required": ["task"],
+    }
+
+    def __init__(self, *, root, model, api_key, base_url, thinking, effort, depth, max_depth, runs_dir):
+        self.root = root
+        self.model = model
+        self.api_key = api_key
+        self.base_url = base_url
+        self.thinking = thinking
+        self.effort = effort
+        self.depth = depth
+        self.max_depth = max_depth
+        self.runs_dir = runs_dir
+
+    def invoke(self, arguments):
+        task = (arguments.get("task") or "").strip()
+        if not task:
+            raise ValueError("task must not be empty")
+
+        child = build_service(
+            self.root,
+            model=self.model,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            thinking=self.thinking,
+            effort=self.effort,
+            approval="never",
+            read_only=True,
+            max_iterations=int(arguments.get("max_steps", 3)),
+            runs_dir=self.runs_dir,
+            depth=self.depth + 1,
+            max_depth=self.max_depth,
+        )
+        session = child.new_session()
+        return "delegate_result:\n" + child.send_message(session.id, task)
